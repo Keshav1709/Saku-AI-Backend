@@ -1,4 +1,30 @@
-node_modules
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+
+# OS
+.DS_Store
+
+# Env/Secrets
+.env
+.env.*
+
+# App data (persisted at runtime)
+data/
+
+# Build/Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
 .env
 dist
 .venv
