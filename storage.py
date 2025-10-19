@@ -1,11 +1,13 @@
 import json
 import os
+import time
 from typing import Any, Dict, List
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CONNECTORS_PATH = os.path.join(DATA_DIR, "connectors.json")
 DOCS_REGISTRY_PATH = os.path.join(DATA_DIR, "docs.json")
+GOOGLE_CREDENTIALS_PATH = os.path.join(DATA_DIR, "google_credentials.json")
 
 
 def ensure_dirs() -> None:
@@ -58,5 +60,19 @@ def load_docs_registry() -> List[Dict[str, Any]]:
 def save_docs_registry(registry: List[Dict[str, Any]]) -> None:
     ensure_dirs()
     _write_json(DOCS_REGISTRY_PATH, registry)
+
+
+def load_google_credentials() -> Dict[str, Any]:
+    ensure_dirs()
+    return _read_json(GOOGLE_CREDENTIALS_PATH, {})
+
+
+def save_google_credentials(credentials: Dict[str, Any]) -> None:
+    ensure_dirs()
+    _write_json(GOOGLE_CREDENTIALS_PATH, credentials)
+
+
+def get_current_timestamp() -> str:
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
 
