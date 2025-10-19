@@ -14,7 +14,7 @@ env/
 # Env/Secrets
 .env
 .env.*
-
+*.env
 # App data (persisted at runtime)
 data/
 
@@ -29,3 +29,10 @@ coverage.xml
 dist
 .venv
 __pycache__
+
+
+# test file
+test_frontend_integration.py
+
+# venv
+saku-ai
