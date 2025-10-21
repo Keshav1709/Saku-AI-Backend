@@ -8,6 +8,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CONNECTORS_PATH = os.path.join(DATA_DIR, "connectors.json")
 DOCS_REGISTRY_PATH = os.path.join(DATA_DIR, "docs.json")
 GOOGLE_CREDENTIALS_PATH = os.path.join(DATA_DIR, "google_credentials.json")
+MEETINGS_PATH = os.path.join(DATA_DIR, "meetings.json")
 
 
 def ensure_dirs() -> None:
@@ -75,4 +76,15 @@ def save_google_credentials(credentials: Dict[str, Any]) -> None:
 def get_current_timestamp() -> str:
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
+
+# ------- Meetings -------
+
+def load_meetings() -> List[Dict[str, Any]]:
+    ensure_dirs()
+    return _read_json(MEETINGS_PATH, [])
+
+
+def save_meetings(meetings: List[Dict[str, Any]]) -> None:
+    ensure_dirs()
+    _write_json(MEETINGS_PATH, meetings)
 
