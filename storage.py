@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CONNECTORS_PATH = os.path.join(DATA_DIR, "connectors.json")
 DOCS_REGISTRY_PATH = os.path.join(DATA_DIR, "docs.json")
+CONVERSATIONS_PATH = os.path.join(DATA_DIR, "conversations.json")
 GOOGLE_CREDENTIALS_PATH = os.path.join(DATA_DIR, "google_credentials.json")
 MEETINGS_PATH = os.path.join(DATA_DIR, "meetings.json")
 
@@ -87,4 +88,18 @@ def load_meetings() -> List[Dict[str, Any]]:
 def save_meetings(meetings: List[Dict[str, Any]]) -> None:
     ensure_dirs()
     _write_json(MEETINGS_PATH, meetings)
+
+
+# ------- Conversations -------
+
+def load_conversations() -> List[Dict[str, Any]]:
+    ensure_dirs()
+    data = _read_json(CONVERSATIONS_PATH, [])
+    # Expect list of { id, title, createdAt, updatedAt, messages: [{role, content, createdAt}] }
+    return data
+
+
+def save_conversations(conversations: List[Dict[str, Any]]) -> None:
+    ensure_dirs()
+    _write_json(CONVERSATIONS_PATH, conversations)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import os
-from typing import Iterable, List, Tuple, Dict
+from typing import Iterable, List, Tuple, Dict, Optional
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -99,9 +99,13 @@ def upsert_document(doc_id: str, text: str, metadata: dict | None = None) -> int
     return len(chunks)
 
 
-def query(text: str, top_k: int = 5) -> List[Tuple[str, Dict]]:
+def query(text: str, top_k: int = 5, doc_ids: Optional[List[str]] = None) -> List[Tuple[str, Dict]]:
     collection = get_collection()
-    res = collection.query(query_texts=[text], n_results=top_k)
+    where = None
+    if doc_ids:
+        where = {"doc_id": {"$in": doc_ids}}
+    # Chroma's query supports metadata filtering via 'where'
+    res = collection.query(query_texts=[text], n_results=top_k, where=where)  # type: ignore
     docs = res.get("documents", [[]])[0]
     metas = res.get("metadatas", [[]])[0]
     return list(zip(docs, metas))

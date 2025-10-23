@@ -16,6 +16,7 @@ import pathlib
 import datetime
 import config
 import subprocess
+from google.cloud import storage as gcs_storage
 
 app = FastAPI()
 
@@ -36,17 +37,23 @@ async def health():
 @app.get("/")
 async def root():
     print("DEBUG: Root endpoint called")
-    return {"message": "SakuAI Backend is running!", "endpoints": ["/health", "/connectors", "/docs"]}
+    return {"message": "SakuAI Backend is running!", "endpoints": ["/health", "/connectors", "/documents"]}
 
 @app.get("/chat/stream")
-async def chat_stream(prompt: str = ""):
+async def chat_stream(prompt: str = "", docIds: str | None = None, convId: str | None = None):
     async def event_generator():
         import json as _json
         # initial meta
         yield f"data: {{\"type\": \"meta\", \"prompt\": {prompt!r} }}\n\n"
         
-        # Retrieve context using RAG
-        top = rag.query(prompt, top_k=5)
+        # Retrieve context using RAG (optionally filtered by uploaded document IDs)
+        selected_ids = None
+        if docIds:
+            if docIds.strip() == "*":
+                selected_ids = None  # all docs
+            else:
+                selected_ids = [d.strip() for d in docIds.split(",") if d.strip()]
+        top = rag.query(prompt, top_k=6, doc_ids=selected_ids)
         context = "\n\n".join([d for d, _ in top])
         citations = rag.format_citations(top)
         
@@ -54,21 +61,71 @@ async def chat_stream(prompt: str = ""):
         yield f"data: {{\"type\": \"context\", \"citations\": {_json.dumps(citations)} }}\n\n"
         
         # Create enhanced prompt with context
-        enhanced_prompt = f"""You are SakuAI, an intelligent AI assistant. Use the provided context to answer the user's question accurately and helpfully.
+        enhanced_prompt = f"""You are SakuAI, an intelligent AI assistant.
+You will receive:
+- User question
+- Optional retrieved context chunks from user's uploaded documents and indexed artifacts
 
-Context:
+Guidelines:
+- First, derive a concise plan for answering the question.
+- Use the context snippets only when relevant; cite key facts succinctly.
+- If context is weak or irrelevant, explicitly say so and answer from general knowledge.
+- Provide a short, direct answer first, followed by brief supporting details.
+
+Context (may be empty):
 {context}
 
 User Question: {prompt}
+"""
 
-Please provide a helpful, accurate response based on the context. If the context doesn't contain relevant information, you can still provide general assistance but mention that you don't have specific context about this topic."""
+        # Persist user message to conversation if provided
+        if convId:
+            try:
+                items = storage.load_conversations()
+                for c in items:
+                    if c.get("id") == convId:
+                        c.setdefault("messages", []).append({
+                            "role": "user",
+                            "content": prompt,
+                            "createdAt": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                        })
+                        # If title is empty, set it from the first user message
+                        title = (c.get("title") or "").strip()
+                        if not title:
+                            # Shorten to first ~8 words
+                            words = prompt.split()
+                            c["title"] = " ".join(words[:8])[:120]
+                        c["updatedAt"] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                        break
+                storage.save_conversations(items)
+            except Exception:
+                pass
 
         # Stream the AI response
+        assistant_accum = []
         for token in genai.stream_completion(enhanced_prompt):
             yield f"data: {{\"type\": \"token\", \"value\": {token!r}}}\n\n"
+            assistant_accum.append(token)
             await asyncio.sleep(0.01)  # Small delay for smooth streaming
         
         yield "data: {\"type\": \"done\"}\n\n"
+        # Save assistant message at the end
+        if convId:
+            try:
+                text = "".join(assistant_accum)
+                items = storage.load_conversations()
+                for c in items:
+                    if c.get("id") == convId:
+                        c.setdefault("messages", []).append({
+                            "role": "assistant",
+                            "content": text,
+                            "createdAt": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                        })
+                        c["updatedAt"] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                        break
+                storage.save_conversations(items)
+            except Exception:
+                pass
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
@@ -169,9 +226,57 @@ async def ingest_upload(file: UploadFile = File(...)):
     storage.save_docs_registry(registry)
     return {"ok": True, "doc_id": doc_id}
 
-@app.get("/docs")
+@app.get("/documents")
 async def docs():
     return JSONResponse({"docs": storage.load_docs_registry()})
+
+# ---------------------- Conversations ----------------------
+
+@app.get("/conversations")
+async def list_conversations():
+    items = storage.load_conversations()
+    # return only metadata
+    meta = [
+        {"id": c.get("id"), "title": c.get("title"), "createdAt": c.get("createdAt"), "updatedAt": c.get("updatedAt")}
+        for c in items
+    ]
+    return {"conversations": meta}
+
+
+@app.post("/conversations")
+async def create_conversation(user_id: str = Form("default")):
+    items = storage.load_conversations()
+    cid = uuid.uuid4().hex
+    now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    items.append({
+        "id": cid,
+        "title": "",
+        "userId": user_id,
+        "createdAt": now,
+        "updatedAt": now,
+        "messages": [],
+    })
+    storage.save_conversations(items)
+    return {"ok": True, "id": cid}
+
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str):
+    items = storage.load_conversations()
+    for c in items:
+        if c.get("id") == conversation_id:
+            return {"conversation": c}
+    return JSONResponse({"error": "not_found"}, status_code=404)
+
+
+@app.get("/conversations/{conversation_id}/messages")
+async def list_messages(conversation_id: str):
+    items = storage.load_conversations()
+    for c in items:
+        if c.get("id") == conversation_id:
+            return {"messages": c.get("messages", [])}
+    return {"messages": []}
+
 
 # --- Mock connectors state ---
 CONNECTORS = None
@@ -496,8 +601,16 @@ def _ffprobe_duration_seconds(file_path: str) -> int | None:
 
 
 @app.get("/meetings")
-async def list_meetings():
+async def list_meetings(userId: str | None = None, orgId: str | None = None):
     meetings = _load_meetings()
+    if userId or orgId:
+        def match(m: Dict[str, Any]) -> bool:
+            if userId and (m.get("userId") or "") != userId:
+                return False
+            if orgId and (m.get("orgId") or "") != orgId:
+                return False
+            return True
+        meetings = [m for m in meetings if match(m)]
     # Lightweight list shape is fine; return full objects for now
     return {"meetings": meetings}
 
@@ -508,11 +621,19 @@ async def create_meeting(
     provider: str = Form("Zoom"),
     date: str = Form(None),
     tags: str = Form("[]"),
+    owner: str = Form(None),
+    participants: str = Form("[]"),
+    userId: str = Form(None),
+    orgId: str = Form(None),
 ):
     try:
         tag_list = json.loads(tags) if tags else []
     except Exception:
         tag_list = []
+    try:
+        participants_list = json.loads(participants) if participants else []
+    except Exception:
+        participants_list = []
     meetings = _load_meetings()
     mid = uuid.uuid4().hex
     now = _now_iso()
@@ -522,6 +643,10 @@ async def create_meeting(
         "provider": provider or "Zoom",
         "date": date or now,
         "tags": tag_list,
+        "owner": owner or "",
+        "participants": participants_list,
+        "userId": userId or "",
+        "orgId": orgId or "",
         "createdAt": now,
         "updatedAt": now,
         "notes": [],
@@ -561,6 +686,10 @@ async def update_meeting(
     provider: str | None = Form(None),
     date: str | None = Form(None),
     tags: str | None = Form(None),
+    owner: str | None = Form(None),
+    participants: str | None = Form(None),
+    userId: str | None = Form(None),
+    orgId: str | None = Form(None),
 ):
     meetings = _load_meetings()
     idx = _find_meeting_idx(meetings, meeting_id)
@@ -578,6 +707,17 @@ async def update_meeting(
             m["tags"] = json.loads(tags)
         except Exception:
             pass
+    if owner is not None:
+        m["owner"] = owner
+    if participants is not None:
+        try:
+            m["participants"] = json.loads(participants)
+        except Exception:
+            pass
+    if userId is not None:
+        m["userId"] = userId
+    if orgId is not None:
+        m["orgId"] = orgId
     m["updatedAt"] = _now_iso()
     meetings[idx] = m
     _save_meetings(meetings)
@@ -677,6 +817,40 @@ async def get_upload_url(
     if _find_meeting_idx(meetings, meeting_id) < 0:
         return JSONResponse({"error": "not_found"}, status_code=404)
 
+    # Prefer GCS signed URL if bucket configured
+    bucket_name = os.getenv("GCS_BUCKET_NAME")
+    if bucket_name:
+        try:
+            client = gcs_storage.Client()
+            bucket = client.bucket(bucket_name)
+            token = uuid.uuid4().hex
+            safe_name = filename.replace("/", "_").replace("\\", "_")
+            blob_path = f"meetings/{meeting_id}/{token}_{safe_name}"
+            blob = bucket.blob(blob_path)
+            upload_url = blob.generate_signed_url(
+                version="v4",
+                expiration=600,
+                method="PUT",
+                content_type=contentType,
+            )
+            object_uri = f"gs://{bucket_name}/{blob_path}"
+            # Keep minimal local map to validate after PUT if needed
+            UPLOAD_TOKENS[token] = {
+                "gcs": True,
+                "bucket": bucket_name,
+                "blob_path": blob_path,
+                "contentType": contentType,
+                "meetingId": meeting_id,
+                "objectUri": object_uri,
+                "expiresAt": time.time() + 600,
+                "consumed": False,
+            }
+            return {"uploadUrl": upload_url, "objectUri": object_uri}
+        except Exception as e:
+            # Fall back to local upload if GCS fails
+            pass
+
+    # Local fallback
     token = uuid.uuid4().hex
     uploads_dir = _uploads_dir()
     safe_name = filename.replace("/", "_").replace("\\", "_")
@@ -906,9 +1080,19 @@ async def search_meetings(
     provider: str | None = None,
     dateRange: str | None = None,
     participants: str | None = None,
+    userId: str | None = None,
+    orgId: str | None = None,
 ):
-    # Basic blended search over metadata + transcript index
     meetings = _load_meetings()
+    if userId or orgId:
+        def scope(m: Dict[str, Any]) -> bool:
+            if userId and (m.get("userId") or "") != userId:
+                return False
+            if orgId and (m.get("orgId") or "") != orgId:
+                return False
+            return True
+        meetings = [m for m in meetings if scope(m)]
+    # Basic blended search over metadata + transcript index
     # Filter by provider/tags/date first
     def match_filters(m: Dict[str, Any]) -> bool:
         if provider and (m.get("provider") or "").lower() != provider.lower():
@@ -921,7 +1105,7 @@ async def search_meetings(
             have = set([(t or "").strip().lower() for t in m.get("tags", [])])
             if not want.issubset(have):
                 return False
-        # dateRange placeholder: expected format "start,end" ISO; optional
+        # dateRange placeholder
         if dateRange and "," in dateRange:
             try:
                 start, end = dateRange.split(",", 1)
@@ -932,19 +1116,25 @@ async def search_meetings(
                     return False
             except Exception:
                 pass
+        if participants:
+            parts = [p.strip().lower() for p in participants.split(",") if p.strip()]
+            if parts:
+                owner = (m.get("owner") or "").strip().lower()
+                plist = [str(p).strip().lower() for p in (m.get("participants") or [])]
+                in_owner = owner in parts if owner else False
+                in_participants = any(p in plist for p in parts)
+                if not (in_owner or in_participants):
+                    return False
         return True
-
     candidates = [m for m in meetings if match_filters(m)]
     if not q.strip():
         return {"results": candidates}
-
     # Keyword score
     def kw_score(m: Dict[str, Any]) -> int:
         agenda_text = " ".join([a.get("item", "") for a in m.get("agenda", [])])
         actions_text = " ".join([a.get("title", "") for a in m.get("actions", [])])
         hay = f"{m.get('title','')} {m.get('provider','')} {' '.join(m.get('tags', []))} {agenda_text} {actions_text}".lower()
         return hay.count(q.lower())
-
     # Transcript score via RAG
     transcript_hits: Dict[str, int] = {}
     for doc, meta in rag.query(q, top_k=20):
@@ -952,13 +1142,11 @@ async def search_meetings(
         if not mid:
             continue
         transcript_hits[mid] = transcript_hits.get(mid, 0) + 1
-
     # Combine and sort
     def total_score(m: Dict[str, Any]) -> float:
         base = kw_score(m)
         extra = transcript_hits.get(m.get("id"), 0)
         return base + 0.75 * extra
-
     ranked = sorted(candidates, key=total_score, reverse=True)
     return {"results": ranked}
 
@@ -1069,6 +1257,41 @@ async def toggle_action_status(meeting_id: str, action_id: str):
     meetings[idx]["updatedAt"] = _now_iso()
     _save_meetings(meetings)
     return {"ok": True, "action": found}
+
+@app.post("/meetings/{meeting_id}/actions/{action_id}/calendar")
+async def create_calendar_event_for_action(
+    meeting_id: str,
+    action_id: str,
+    start: str = Form(...),
+    end: str = Form(...),
+):
+    meetings = _load_meetings()
+    idx = _find_meeting_idx(meetings, meeting_id)
+    if idx < 0:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    actions = meetings[idx].get("actions", [])
+    action = next((a for a in actions if a.get("id") == action_id), None)
+    if not action:
+        return JSONResponse({"error": "action_not_found"}, status_code=404)
+    title = action.get("title") or f"Meeting Action {action_id}"
+    description = f"Action from meeting {meeting_id}"
+    attendees = []
+    # Try to include owner and participants as attendees if they look like emails
+    owner = meetings[idx].get("owner") or ""
+    if "@" in owner:
+        attendees.append(owner)
+    for p in (meetings[idx].get("participants") or []):
+        if isinstance(p, str) and "@" in p:
+            attendees.append(p)
+    result = calendar_service.create_event(summary=title, start_iso=start, end_iso=end, description=description, attendees=attendees)
+    if not result:
+        return JSONResponse({"error": "calendar_create_failed"}, status_code=500)
+    # Optionally store calendar link on action
+    action["calendarEventId"] = result.get("id")
+    action["calendarLink"] = result.get("htmlLink")
+    meetings[idx]["updatedAt"] = _now_iso()
+    _save_meetings(meetings)
+    return {"ok": True, "event": result, "action": action}
 
 @app.put("/meetings/{meeting_id}/insights")
 async def update_insights(meeting_id: str, payload: dict):

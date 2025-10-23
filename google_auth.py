@@ -364,6 +364,33 @@ class CalendarService:
         except HttpError as error:
             print(f"Calendar API error: {error}")
             return []
+
+    def create_event(self, summary: str, start_iso: str, end_iso: str, description: str = "", attendees: list | None = None) -> dict:
+        """Create a calendar event on the primary calendar.
+        start_iso/end_iso should be RFC3339 timestamps, e.g. 2025-10-21T07:30:00Z
+        """
+        try:
+            service = self.get_service()
+            event_body = {
+                'summary': summary or 'Untitled',
+                'description': description or '',
+                'start': {'dateTime': start_iso},
+                'end': {'dateTime': end_iso},
+            }
+            if attendees:
+                event_body['attendees'] = [{'email': a} if isinstance(a, str) else a for a in attendees]
+            created = service.events().insert(calendarId='primary', body=event_body).execute()
+            return {
+                'id': created.get('id'),
+                'htmlLink': created.get('htmlLink'),
+                'status': created.get('status', 'confirmed')
+            }
+        except HttpError as error:
+            print(f"Calendar create_event error: {error}")
+            return {}
+        except Exception as e:
+            print(f"Calendar create_event service error: {e}")
+            return {}
         except Exception as e:
             print(f"Calendar service error: {e}")
             return []
