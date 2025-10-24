@@ -10,6 +10,8 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import storage
+from email.mime.text import MIMEText
+import base64 as _b64
 
 # Import config to ensure environment variables are loaded
 import config
@@ -72,21 +74,27 @@ class GoogleAuthService:
         )
         
         # Encode service type in the state parameter
+        # CRITICAL: Pass state to authorization_url() method, not flow.state
         if state:
             # Prepend service type to state for reliable detection
-            flow.state = f"{service_type}:{state}"
+            custom_state = f"{service_type}:{state}"
         else:
-            flow.state = f"{service_type}:{uuid.uuid4().hex}"
+            custom_state = f"{service_type}:{uuid.uuid4().hex}"
         
         auth_url, _ = flow.authorization_url(
             access_type='offline',
-            include_granted_scopes='true'
+            include_granted_scopes='true',
+            state=custom_state  # Pass state here to prevent override
         )
+        
+        print(f"DEBUG: Generated auth URL with state: {custom_state}")
         
         return auth_url
     
     def exchange_code_for_token(self, service_type: str, authorization_code: str) -> Dict[str, Any]:
         """Exchange authorization code for access token"""
+        import requests
+        
         if service_type == "gmail":
             scopes = GMAIL_SCOPES
         elif service_type == "drive":
@@ -96,29 +104,54 @@ class GoogleAuthService:
         else:
             raise ValueError(f"Unknown service type: {service_type}")
         
-        # Create flow with all possible scopes to handle Google's scope aggregation
-        all_scopes = GMAIL_SCOPES + DRIVE_SCOPES + CALENDAR_SCOPES
+        # Manually exchange the authorization code for tokens
+        # This bypasses the oauthlib scope validation that causes issues when Google adds OpenID scopes
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            'code': authorization_code,
+            'client_id': CLIENT_ID,
+            'client_secret': CLIENT_SECRET,
+            'redirect_uri': REDIRECT_URI,
+            'grant_type': 'authorization_code'
+        }
         
-        flow = Flow.from_client_config(
-            self.client_config,
-            scopes=all_scopes,  # Use all scopes to avoid scope mismatch
-            redirect_uri=REDIRECT_URI
-        )
+        print(f"DEBUG: Exchanging authorization code for tokens (service: {service_type})")
         
-        # Fetch token
         try:
-            flow.fetch_token(code=authorization_code)
-            print(f"DEBUG: Token exchange successful with all scopes")
+            response = requests.post(token_url, data=token_data)
+            response.raise_for_status()
+            token_response = response.json()
+            
+            print(f"DEBUG: Token exchange successful")
+            print(f"DEBUG: Received token with scopes: {token_response.get('scope', 'N/A')}")
+            
+            # Create credentials object manually
+            from google.oauth2.credentials import Credentials
+            from datetime import datetime, timedelta
+            
+            expiry = None
+            if 'expires_in' in token_response:
+                expiry = datetime.utcnow() + timedelta(seconds=token_response['expires_in'])
+            
+            credentials = Credentials(
+                token=token_response['access_token'],
+                refresh_token=token_response.get('refresh_token'),
+                token_uri=token_url,
+                client_id=CLIENT_ID,
+                client_secret=CLIENT_SECRET,
+                scopes=token_response.get('scope', '').split() if token_response.get('scope') else scopes,
+                expiry=expiry
+            )
+            
+        except requests.exceptions.HTTPError as e:
+            print(f"ERROR: HTTP error during token exchange: {e}")
+            print(f"ERROR: Response: {e.response.text if e.response else 'N/A'}")
+            if "invalid_grant" in str(e).lower() or (e.response and "invalid_grant" in e.response.text.lower()):
+                raise Exception("Authorization code expired or invalid. Please try connecting again.")
+            raise Exception(f"Token exchange failed: {str(e)}")
         except Exception as e:
-            print(f"DEBUG: Token exchange failed: {str(e)}")
-            # If it's an invalid_grant error, the code might be expired or already used
-            if "invalid_grant" in str(e):
-                print(f"DEBUG: Invalid grant error - authorization code may be expired or already used")
-                raise Exception(f"Authorization code expired or invalid: {str(e)}")
-            else:
-                raise e
-        
-        credentials = flow.credentials
+            print(f"ERROR: Token exchange failed: {str(e)}")
+            raise e
         
         # Store credentials with all required fields for token refresh
         creds_data = {
@@ -253,7 +286,8 @@ class GmailService:
                     'subject': subject,
                     'sender': sender,
                     'date': date,
-                    'snippet': msg.get('snippet', '')
+                    'snippet': msg.get('snippet', ''),
+                    'threadId': msg.get('threadId')
                 })
             
             return detailed_messages
@@ -264,6 +298,53 @@ class GmailService:
         except Exception as e:
             print(f"Gmail service error: {e}")
             return []
+
+    def _encode_message(self, to: str, subject: str, body: str, headers: dict | None = None) -> str:
+        """Create base64url-encoded RFC-2822 message body."""
+        mime = MIMEText(body or "")
+        mime['To'] = to
+        mime['Subject'] = subject or ''
+        if headers:
+            for k, v in headers.items():
+                if k.lower() in {"to", "subject"}:
+                    continue
+                mime[k] = v
+        raw_bytes = mime.as_bytes()
+        return _b64.urlsafe_b64encode(raw_bytes).decode('utf-8')
+
+    def send_message(self, to: str, subject: str, body: str, thread_id: str | None = None, headers: dict | None = None) -> dict:
+        """Send an email via Gmail API. Optionally attach to a thread."""
+        try:
+            service = self.get_service()
+            raw = self._encode_message(to, subject, body, headers)
+            payload: Dict[str, Any] = { 'raw': raw }
+            if thread_id:
+                payload['threadId'] = thread_id
+            sent = service.users().messages().send(userId='me', body=payload).execute()
+            return { 'id': sent.get('id'), 'threadId': sent.get('threadId') }
+        except HttpError as error:
+            print(f"Gmail send error: {error}")
+            return {}
+        except Exception as e:
+            print(f"Gmail send service error: {e}")
+            return {}
+
+    def create_draft(self, to: str, subject: str, body: str, thread_id: str | None = None, headers: dict | None = None) -> dict:
+        """Create a draft email."""
+        try:
+            service = self.get_service()
+            raw = self._encode_message(to, subject, body, headers)
+            message: Dict[str, Any] = { 'raw': raw }
+            if thread_id:
+                message['threadId'] = thread_id
+            draft = service.users().drafts().create(userId='me', body={'message': message}).execute()
+            return { 'id': draft.get('id'), 'message': draft.get('message', {}) }
+        except HttpError as error:
+            print(f"Gmail draft error: {error}")
+            return {}
+        except Exception as e:
+            print(f"Gmail draft service error: {e}")
+            return {}
 
 # Google Drive API service
 class DriveService:

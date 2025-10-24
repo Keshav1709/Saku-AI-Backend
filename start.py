@@ -5,10 +5,16 @@ Startup script for Saku AI Backend
 import os
 import sys
 import uvicorn
+from dotenv import load_dotenv
 
 def main():
-    # Set default port
-    port = int(os.getenv("PORT", 8000))
+    # Load .env so PORT and other vars can be set there
+    try:
+        load_dotenv()
+    except Exception:
+        pass
+    # Default to 8080 for local development
+    port = int(os.getenv("PORT", 8080))
     host = os.getenv("HOST", "0.0.0.0")
     
     print(f"Starting Saku AI Backend on {host}:{port}")

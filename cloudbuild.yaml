@@ -1,0 +1,44 @@
+steps:
+  # Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'build',
+      '-t', 'asia-south1-docker.pkg.dev/$PROJECT_ID/sakuai-backend/backend:$COMMIT_SHA',
+      '-t', 'asia-south1-docker.pkg.dev/$PROJECT_ID/sakuai-backend/backend:latest',
+      '.'
+    ]
+
+  # Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'asia-south1-docker.pkg.dev/$PROJECT_ID/sakuai-backend/backend:$COMMIT_SHA']
+  
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'asia-south1-docker.pkg.dev/$PROJECT_ID/sakuai-backend/backend:latest']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'sakuai-backend-service'
+      - '--image=asia-south1-docker.pkg.dev/$PROJECT_ID/sakuai-backend/backend:$COMMIT_SHA'
+      - '--region=asia-south1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--memory=2Gi'
+      - '--cpu=2'
+      - '--timeout=300'
+      - '--max-instances=10'
+      - '--min-instances=0'
+      - '--port=8080'
+      - '--update-labels=app=sakuai,tier=backend,environment=production'
+
+images:
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/sakuai-backend/backend:$COMMIT_SHA'
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/sakuai-backend/backend:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+

@@ -34,19 +34,36 @@ def _write_json(path: str, data: Any) -> None:
 
 
 def load_connectors() -> List[Dict[str, Any]]:
+    """Load connectors from disk and sanitize to only supported ones.
+    Supported: gmail, drive, calendar.
+    """
     ensure_dirs()
-    data = _read_json(
+    raw = _read_json(
         CONNECTORS_PATH,
         [
-            {"key": "gmail", "name": "Gmail", "connected": True},
-            {"key": "slack", "name": "Slack", "connected": False},
+            {"key": "gmail", "name": "Gmail", "connected": False},
             {"key": "drive", "name": "Google Drive", "connected": False},
-            {"key": "notion", "name": "Notion", "connected": False},
             {"key": "calendar", "name": "Google Calendar", "connected": False},
-            {"key": "discord", "name": "Discord", "connected": False},
         ],
     )
-    return data
+    allowed = {"gmail": "Gmail", "drive": "Google Drive", "calendar": "Google Calendar"}
+    # Normalize and filter
+    result: List[Dict[str, Any]] = []
+    seen = set()
+    for it in raw if isinstance(raw, list) else []:
+        k = str(it.get("key", "")).strip()
+        if k in allowed and k not in seen:
+            result.append({
+                "key": k,
+                "name": allowed[k],
+                "connected": bool(it.get("connected", False)),
+            })
+            seen.add(k)
+    # Ensure all allowed exist at least once
+    for k, v in allowed.items():
+        if k not in seen:
+            result.append({"key": k, "name": v, "connected": False})
+    return result
 
 
 def save_connectors(connectors: List[Dict[str, Any]]) -> None:

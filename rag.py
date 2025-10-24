@@ -3,11 +3,22 @@ from __future__ import annotations
 import io
 import os
 from typing import Iterable, List, Tuple, Dict, Optional
+import warnings
+import logging
+
+# Disable ChromaDB telemetry completely
+os.environ['ANONYMIZED_TELEMETRY'] = 'False'
+os.environ['CHROMA_TELEMETRY'] = 'False'
 
 import chromadb
 from chromadb.utils import embedding_functions
 from pypdf import PdfReader
 import trafilatura
+
+# Suppress ChromaDB telemetry warnings
+warnings.filterwarnings('ignore', message='.*capture.*')
+logging.getLogger('chromadb').setLevel(logging.ERROR)
+logging.getLogger('chromadb.telemetry').setLevel(logging.CRITICAL)
 
 
 CHROMA_DIR = os.path.join(os.path.dirname(__file__), "data", "chroma")
